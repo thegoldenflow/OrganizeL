@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { BatteryLow, BatteryMedium, Check, ChevronDown, Footprints, Inbox, MessageCircle, PanelRightClose, RotateCcw, Route, Sprout, X } from 'lucide-react'
+import { BatteryLow, BatteryMedium, Check, ChevronDown, CircleHelp, Footprints, Inbox, MessageCircle, PanelRightClose, RotateCcw, Route, Sprout, X } from 'lucide-react'
 import type { Page, Scenario } from '../data/types'
 import { inboxItems, useApp } from '../state/store'
 import { todayLabel } from '../lib/dates'
@@ -93,7 +93,7 @@ const SCENARIOS: { id: Scenario; label: string; hint: string }[] = [
 
 /** 顶部低调标识“演示数据”，同时也是切换演示场景的菜单 */
 function DemoMenu() {
-  const { state, loadScenario, resetDemo } = useApp()
+  const { state, loadScenario, resetDemo, setOnboarding, go } = useApp()
   const m = useMenu()
   return (
     <div className={cx('relative', m.open && 'z-40')} ref={m.rootRef}>
@@ -146,6 +146,20 @@ function DemoMenu() {
             <RotateCcw size={15} className="text-muted" aria-hidden />
             重置演示
             <span className="ml-auto text-[12px] text-muted">恢复初始示例</span>
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              m.close(false)
+              setOnboarding('manual')
+              go('now')
+              requestAnimationFrame(() => document.getElementById('onboard-title')?.focus())
+            }}
+            className={cx(menuItem, 'items-center')}
+          >
+            <CircleHelp size={15} className="text-muted" aria-hidden />
+            新手引导
+            <span className="ml-auto text-[12px] text-muted">再看一遍</span>
           </button>
         </div>
       )}

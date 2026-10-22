@@ -12,6 +12,8 @@ export type Adjust =
   | {
       reason: 'too_big'
       smallTitle: string
+      /** 缩小后的这一步对应原来的第几步：确认后把那一步勾掉 */
+      stepIndex?: number
       source?: string
       checks: { id: string; label: string; value: string }[]
     }
@@ -35,6 +37,8 @@ export interface Task {
   criteria?: string
   steps?: string[]
   stepsDone?: number[]
+  /** 步骤是谁定的：ai 是系统拆的建议（页面上会标出来，可以改）；user 是用户改过或确认过的 */
+  stepsBy?: 'ai' | 'user'
   reasons?: { label: string; text: string }[]
   estimate?: string
   /** ISO 日期（yyyy-mm-dd） */
@@ -53,6 +57,12 @@ export interface Task {
   note?: string
   /** 来自“待整理”的随手记录 */
   captured?: boolean
+  /** 约好的开始时间（ISO）：用户说“现在不方便”时定下的 */
+  planAt?: string
+  /** 这次约定在进展里的那条记录（取消时删掉它） */
+  planEventId?: string
+  /** 生成日历文件时约的是哪个时间：之后改约或取消，提醒用户日历里还有旧的那条 */
+  planCal?: string
   createdAt: string
   doneAt?: string
 }
@@ -74,6 +84,13 @@ export interface Artifact {
   before?: string
   after: string
   note: string
+  /**
+   * 采用之后算什么：
+   * - result（默认）：成果本身就是要交付的东西，采用 = 这件事完成了
+   * - steps：拆解建议，采用 = 写进这件事的步骤，事情还没做
+   * - step：完成了其中一步（比如写好了消息，还要自己发出去）
+   */
+  use?: 'result' | 'steps' | 'step'
   status: 'draft' | 'adopted'
   createdAt: string
   updatedAt: string
@@ -131,6 +148,8 @@ export interface AppState {
   energy: 'normal' | 'low'
   direction: { title: string; horizon: string }
   adjustCondition: string
+  /** 现在这条阶段路线是按哪一类方向排的（求职 / 学习 / 运动 / 项目 / 其他）；没有就是示例里的求职路线 */
+  planKind?: 'job' | 'learn' | 'fitness' | 'project' | 'general'
   stages: Stage[]
   focusTaskId: string | null
   tasks: Task[]

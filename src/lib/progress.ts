@@ -36,6 +36,8 @@ export function routeCaption(done: number, total: number) {
   const left = total - done
   if (total === 0) return ''
   if (left <= 0) return '整条路线都走完了'
+  // 新路线刚开始时不说“已完成 0 个”
+  if (done === 0) return `整条路线刚开始，一共 ${total} 个行动`
   return done <= left ? `整条路线已完成 ${done} 个行动` : `整条路线还差 ${left} 个行动`
 }
 

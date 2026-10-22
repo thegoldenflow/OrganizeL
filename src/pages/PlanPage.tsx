@@ -17,11 +17,12 @@ import {
   Target,
 } from 'lucide-react'
 import type { Bucket, Stage, Task } from '../data/types'
-import { MOVE_VERB, focusTask, stageTasks, useApp } from '../state/store'
+import { MOVE_VERB, focusTask, planAddNote, stageTasks, useApp } from '../state/store'
 import { dueLabel } from '../lib/dates'
 import { Button, CategoryTag, Pill, SectionHeader, cx, menuItem, menuPanel } from '../components/ui'
 import { useMenu } from '../lib/hooks'
 import { routeCaption } from '../lib/progress'
+import { directionKind, planDirection, type PlanTemplate } from '../lib/mockAI'
 
 export function PlanPage() {
   return (
@@ -51,64 +52,153 @@ export function PlanPage() {
 }
 
 function DirectionCard() {
-  const { state, dispatch, showToast } = useApp()
+  const { state, dispatch, showToast, say } = useApp()
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(state.direction.title)
+  // 换了方向时，系统拟一条新路线让用户确认（系统提议，用户决定）
+  const [proposal, setProposal] = useState<{ title: string; plan: PlanTemplate; changed: boolean } | null>(null)
   const ref = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (editing) ref.current?.select()
   }, [editing])
   useEffect(() => setValue(state.direction.title), [state.direction.title])
+  const focusById = (id: string) => requestAnimationFrame(() => document.getElementById(id)?.focus())
+
+  const propose = (title: string, changed: boolean) => {
+    setProposal({ title, plan: planDirection(title), changed })
+    focusById('replan-title')
+  }
 
   const save = () => {
     const v = value.trim()
     setEditing(false)
     if (!v || v === state.direction.title) return setValue(state.direction.title)
+    // 只是改改措辞（还是同一类方向），不打扰；换了一类方向，才主动提议重新规划
+    const changedKind = directionKind(v) !== directionKind(state.direction.title)
     dispatch({ type: 'set_direction', title: v })
-    showToast('近期方向已更新，首页同步显示')
+    if (changedKind) propose(v, true)
+    else showToast('近期方向已更新，首页同步显示')
+  }
+
+  const pending = state.tasks.filter((t) => t.bucket === 'plan' && t.status !== 'done').length
+  // 现在的阶段是按哪类方向排的（示例数据是求职）；和方向对不上时，才给“重新规划阶段”的入口
+  const mismatch = directionKind(state.direction.title) !== (state.planKind ?? 'job')
+
+  const apply = () => {
+    if (!proposal) return
+    const snap = state
+    // 约好了时间的事会挪到“稍后考虑”，约定也随之取消：说出来，别让日历里的提醒变成“幽灵”
+    const booked = state.tasks.find((t) => t.bucket === 'plan' && t.status !== 'done' && t.planAt && new Date(t.planAt).getTime() > Date.now())
+    dispatch({ type: 'replan', title: proposal.title, plan: proposal.plan })
+    setProposal(null)
+    showToast('已按新方向重新规划', () => {
+      dispatch({ type: 'load', state: snap })
+      showToast('已撤销，回到原来的阶段')
+    })
+    const first = proposal.plan.stages[0]
+    say(
+      `按“${proposal.title}”重新规划了 ${proposal.plan.stages.length} 个阶段。现在从“${first.title}”开始，第一件是：${first.tasks[0].title}。` +
+        (booked ? `原来给“${booked.title}”约的时间取消了${booked.planCal ? '，日历里那条提醒需要你自己删掉' : ''}。` : ''),
+    )
+    focusById('direction-title')
   }
 
   return (
-    <section className="card flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:p-6">
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
-        <Target size={20} />
-      </div>
-      <div className="min-w-0 flex-1">
-        {editing ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              save()
-            }}
-            className="flex flex-wrap items-center gap-2"
-          >
-            <input
-              ref={ref}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => e.key === 'Escape' && (setEditing(false), setValue(state.direction.title))}
-              className="h-10 min-w-0 flex-1 rounded-lg border border-accent/50 bg-surface px-3 text-[17px] font-semibold outline-none ring-4 ring-accent/10"
-              aria-label="近期方向"
-            />
-            <Button type="submit" variant="primary" size="sm">
-              保存
+    <>
+      <section className="card flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:p-6">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+          <Target size={20} />
+        </div>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                save()
+              }}
+              className="flex flex-wrap items-center gap-2"
+            >
+              <input
+                ref={ref}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && (setEditing(false), setValue(state.direction.title))}
+                className="h-10 min-w-0 flex-1 rounded-lg border border-accent/50 bg-surface px-3 text-[17px] font-semibold outline-none ring-4 ring-accent/10"
+                aria-label="近期方向"
+              />
+              <Button type="submit" variant="primary" size="sm">
+                保存
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => (setEditing(false), setValue(state.direction.title))}>
+                取消
+              </Button>
+            </form>
+          ) : (
+            <p id="direction-title" tabIndex={-1} className="text-[19px] font-semibold leading-snug tracking-tight outline-none">
+              {state.direction.title}
+            </p>
+          )}
+          <p className="mt-1 text-[13px] text-muted">近期方向 · {state.direction.horizon}</p>
+          <RouteProgress />
+        </div>
+        {!editing && (
+          <div className="flex items-center gap-1 self-start sm:flex-col sm:items-end sm:self-center">
+            <Button variant="ghost" size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(true)}>
+              编辑
             </Button>
-            <Button type="button" variant="ghost" size="sm" onClick={() => (setEditing(false), setValue(state.direction.title))}>
-              取消
-            </Button>
-          </form>
-        ) : (
-          <p className="text-[19px] font-semibold leading-snug tracking-tight">{state.direction.title}</p>
+            {!proposal && mismatch && (
+              <button onClick={() => propose(state.direction.title, false)} className="hit rounded-md px-2 py-1 text-[12px] text-muted hover:text-ink">
+                重新规划阶段
+              </button>
+            )}
+          </div>
         )}
-        <p className="mt-1 text-[13px] text-muted">近期方向 · {state.direction.horizon}</p>
-        <RouteProgress />
-      </div>
-      {!editing && (
-        <Button variant="ghost" size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(true)} className="self-start sm:self-center">
-          编辑
-        </Button>
+      </section>
+
+      {proposal && (
+        <section aria-labelledby="replan-title" className="card mt-3 animate-rise border-accent/30 p-5 sm:p-6">
+          <h2 id="replan-title" tabIndex={-1} className="text-[16px] font-semibold leading-snug text-ink outline-none">
+            {proposal.changed ? '方向变了，要按新方向重新规划阶段吗？' : '按现在的方向重新规划阶段？'}
+          </h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted">
+            系统按“{proposal.title}”拟了一条路线（{proposal.plan.horizon}），你看看合不合适：
+          </p>
+          <ol className="mt-4 space-y-3">
+            {proposal.plan.stages.map((st, i) => (
+              <li key={st.title} className="flex gap-3">
+                <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold tabular-nums text-accent-ink">
+                  {i + 1}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-[14px] font-semibold text-ink">{st.title}</p>
+                  <p className="text-[13px] leading-relaxed text-muted">阶段成果：{st.outcome}</p>
+                  <p className="mt-0.5 text-[13px] leading-relaxed text-ink-2">{st.tasks.map((x) => x.title).join('；')}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          <p className="mt-4 rounded-lg bg-canvas px-3 py-2 text-[13px] leading-relaxed text-ink-2">
+            {pending ? `现在规划里还没做完的 ${pending} 件事会放到“稍后考虑”，随时能拿回来；` : ''}
+            做完的记录都留在进展里。先只拆第一件事的步骤，后面的事用到时再拆。
+          </p>
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button variant="primary" className="w-full sm:w-auto" onClick={apply}>
+              按这个重新规划
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setProposal(null)
+                showToast('好，阶段保持不变')
+                focusById('direction-title')
+              }}
+            >
+              保留现在的阶段
+            </Button>
+          </div>
+        </section>
       )}
-    </section>
+    </>
   )
 }
 
@@ -396,6 +486,7 @@ function AdjustCondition() {
         <h2 className="text-[15px] font-semibold">什么时候重新检查方向</h2>
       </div>
       <p className="mt-2 text-[14px] leading-relaxed text-ink-2">{state.adjustCondition}</p>
+      {applyTask && applyTask.stageId && (
       <div className="mt-3 flex flex-wrap gap-2 text-[12px]">
         <Pill tone={applied ? 'accent' : 'outline'} icon={applied ? <Check size={12} /> : <Clock3 size={12} />}>
           完成一轮针对性投递{applied ? '' : `（${applyStage?.status === 'upcoming' ? '下一阶段' : '进行中'}）`}
@@ -404,6 +495,7 @@ function AdjustCondition() {
           收到投递反馈{outcomesReceived ? '' : '（尚未开始）'}
         </Pill>
       </div>
+      )}
       <p className="mt-3 text-[12px] text-muted">在这之前，不需要反复怀疑方向；按阶段推进就好。</p>
     </section>
   )
@@ -442,7 +534,7 @@ function SideGroup({ bucket }: { bucket: 'maintain' | 'later' }) {
                 onClick={() => {
                   const snap = state
                   dispatch({ type: 'move', id: t.id, bucket: 'plan' })
-                  showToast(`已加入当前规划：“${t.title}”`, () => {
+                  showToast(`已加入当前规划：“${t.title}”${planAddNote(t)}`, () => {
                     dispatch({ type: 'load', state: snap })
                     showToast('已撤销')
                   })

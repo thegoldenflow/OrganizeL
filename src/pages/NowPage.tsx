@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  AlarmClock,
   ArrowLeft,
   ArrowRight,
   BatteryLow,
   CalendarClock,
+  CalendarPlus,
   Check,
   ChevronDown,
   CircleCheck,
   Clock3,
   FileText,
   Focus,
+  Footprints,
   History,
   LifeBuoy,
   Lightbulb,
@@ -35,10 +38,11 @@ import {
   useBackHandler,
   VISIT_GAP_DAYS,
 } from '../state/store'
-import { stuckAdjust } from '../lib/mockAI'
+import { aiHelp, stuckAdjust } from '../lib/mockAI'
 import { clockLabel, dueLabel, daysFromToday, greeting, minutesOf, relativeTime } from '../lib/dates'
 import { focusPrimary, reveal, useNow } from '../lib/hooks'
 import { afterDoneCaption, stageCaption, stepTag } from '../lib/progress'
+import { downloadFile, firstStepOf, planIcs, planLabel, planOptions, planRulesFor, ruleConflict, toLocalInput } from '../lib/plan'
 import { Button, CheckDraw, IconButton, Pill, Spinner, cx } from '../components/ui'
 
 export function NowPage() {
@@ -60,13 +64,27 @@ function useRestBoundary(task?: Task) {
 }
 
 function NowHome() {
-  const { state, go, restDecision } = useApp()
+  const { state, go, restDecision, onboarding } = useApp()
   const task = focusTask(state)
   const low = state.energy === 'low'
   const resuming = !!state.resume && state.resume.taskId === task?.id
   const rest = useRestBoundary(task)
   const resting = !!task && restDecision === 'stop'
-  const restPrompt = rest.active && restDecision === null
+  // 约个时间：还没到点就先不催；到点后 6 小时内提一句。过了很久就不再提，不做“逾期”式提醒
+  const planAt = task?.planAt ? new Date(task.planAt) : null
+  const booked = !!planAt && planAt > rest.now
+  // 到了休息时间就不再提“约好的时间到了”，和休息提醒不打架
+  const planDue = !!planAt && !booked && !rest.active && rest.now.getTime() - planAt.getTime() < 6 * 3600_000
+  const restPrompt = rest.active && restDecision === null && !booked
+  // 第一次打开时自动出现的引导，只在普通状态下出现；从菜单里主动打开的，任何时候都显示
+  const showGuide = onboarding === 'manual' || (onboarding === 'first' && !low && !resuming && !resting)
+
+  // 页面开着时到了约好的时间，“约好了”卡片会换成行动卡：焦点如果因此丢了，交给新的主按钮
+  const wasBooked = useRef(booked)
+  useEffect(() => {
+    if (wasBooked.current && !booked && (!document.activeElement || document.activeElement === document.body)) focusPrimary()
+    wasBooked.current = booked
+  }, [booked])
 
   // 新起点效应：周一、隔了几天再打开，都是“重新开始”的好时机，用不带内疚的说法接住
   const now = new Date()
@@ -76,17 +94,21 @@ function NowHome() {
     ? '今天就到这里'
     : !task
       ? '行动都完成了，可以歇一歇'
-      : restPrompt
-        ? `${greeting()}，今天可以收工了`
-        : resuming
-          ? '欢迎回来，接着上次的来'
-          : low
-            ? '今天精力有限，推进一小步就够'
-            : VISIT_GAP_DAYS >= 3
-              ? '好久不见，从这一件重新开始就好'
-              : freshWeek
-                ? '新的一周，先推进这一件'
-                : `${greeting()}，先推进这一件`
+      : booked
+        ? '约好了，现在可以先忙别的'
+        : restPrompt
+          ? `${greeting()}，今天可以收工了`
+          : planDue
+            ? '约好的时间到了，从这一件开始'
+            : resuming
+              ? '欢迎回来，接着上次的来'
+              : low
+                ? '今天精力有限，推进一小步就够'
+                : VISIT_GAP_DAYS >= 3
+                  ? '好久不见，从这一件重新开始就好'
+                  : freshWeek
+                    ? '新的一周，先推进这一件'
+                    : `${greeting()}，先推进这一件`
 
   return (
     <div className="mx-auto w-full max-w-[760px]">
@@ -106,7 +128,20 @@ function NowHome() {
 
       {state.justCompleted && <CompletedBanner />}
 
-      {task ? resting ? <RestingCard task={task} /> : <ActionCard key={task.id} task={task} /> : <AllDone />}
+      {task ? (
+        resting ? (
+          <RestingCard task={task} />
+        ) : booked ? (
+          <BookedCard key={task.id} task={task} at={planAt!} />
+        ) : (
+          <ActionCard key={task.id} task={task} planDue={planDue} />
+        )
+      ) : (
+        <AllDone />
+      )}
+
+      {/* 放在行动卡下面：先看到“这一件事”，再看到怎么用；手机上主按钮不会被挤到屏幕外 */}
+      {showGuide && <Onboarding />}
 
       <SideInfo quiet={low || resting} />
     </div>
@@ -179,16 +214,29 @@ function RestingCard({ task }: { task: Task }) {
   const done = new Set(task.stepsDone ?? [])
   const next = steps.findIndex((_, i) => !done.has(i))
   const art = artifactById(state, task.artifactId)
-  const status =
-    art?.status === 'draft'
+  const planAt = task.planAt && new Date(task.planAt).getTime() > Date.now() ? new Date(task.planAt) : null
+  const where = state.resume?.taskId === task.id ? state.resume.where : undefined
+  const status = planAt
+    ? `到时候先做：${firstStepOf(task, where)}。`
+    : art?.status === 'draft'
       ? '草稿已经存好，明天打开就能接着改。'
       : done.size && next !== -1
         ? `已经做了 ${done.size}/${steps.length} 步，明天从第 ${next + 1} 步开始。`
-        : '还没开始也没关系，明天可以先让 AI 写一版草稿。'
+        : aiHelp(task)
+          ? '还没开始也没关系，明天可以先让 AI 写一版草稿。'
+          : `还没开始也没关系，明天从第一步开始：${steps[0] ?? '花 5 分钟看一眼要做什么'}。`
   return (
     <section className="card animate-rise p-5 sm:p-7" aria-labelledby="tomorrow-title">
       <p className="flex items-center gap-2 text-[13px] font-medium text-sky-ink">
-        <Moon size={15} aria-hidden /> 明天从这里开始
+        {planAt ? (
+          <>
+            <CalendarClock size={15} aria-hidden /> 约好了 · {planLabel(planAt)}
+          </>
+        ) : (
+          <>
+            <Moon size={15} aria-hidden /> 明天从这里开始
+          </>
+        )}
       </p>
       <h2 id="tomorrow-title" className="mt-2 text-balance text-[20px] font-semibold leading-snug tracking-tight">
         {task.title}
@@ -237,6 +285,132 @@ function RestingCard({ task }: { task: Task }) {
   )
 }
 
+/* ---------------- 新手引导 ---------------- */
+
+/**
+ * 只讲三件事（工作记忆一次大约装得下 4 块，Cowan, 2001），不弹窗、不分页、随时可以收起。
+ * 人一般不读说明就直接开始用（“主动用户悖论”，Carroll & Rosson, 1987），所以引导写在首页里，几秒能看完。
+ */
+const ONBOARDING: [string, string][] = [
+  ['首页每次只放一件事。', '完整的规划在“规划”页，不用每天自己排。'],
+  ['做不动就点“卡住了”。', '选个原因，这一步会变小，或者给你一个开头。'],
+  ['想到别的事，去“待整理”随手记。', '不用分类，也不用填日期。'],
+]
+
+function Onboarding() {
+  const { setOnboarding } = useApp()
+  return (
+    <section aria-labelledby="onboard-title" className="mt-4 animate-rise rounded-2xl border border-line bg-surface/70 p-4 sm:p-5">
+      <h2 id="onboard-title" tabIndex={-1} className="text-[15px] font-semibold text-ink outline-none">
+        第一次用？记住三件事就够了
+      </h2>
+      <ol className="mt-2 space-y-1.5">
+        {ONBOARDING.map(([lead, more], i) => (
+          <li key={lead} className="flex items-start gap-3 text-[14px] leading-relaxed">
+            <span
+              aria-hidden
+              className="mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[12px] font-semibold tabular-nums text-accent-ink"
+            >
+              {i + 1}
+            </span>
+            <span>
+              <span className="font-medium text-ink">{lead}</span>
+              <span className="hidden text-ink-2 sm:inline">{more}</span>
+            </span>
+          </li>
+        ))}
+      </ol>
+      {/* 读完再收起：按钮放在最后，也不会被手机右下角的助手按钮挡住 */}
+      <Button
+        size="sm"
+        variant="ghost"
+        className="-ml-3 mt-2"
+        onClick={() => {
+          setOnboarding(false)
+          focusPrimary()
+        }}
+      >
+        知道了
+      </Button>
+    </section>
+  )
+}
+
+/* ---------------- 约好了时间 ---------------- */
+
+function BookedCard({ task, at }: { task: Task; at: Date }) {
+  const { state, dispatch, cancelPlan, showToast, planFor, setPlanFor } = useApp()
+  const [changingHere, setChanging] = useState(false)
+  // 也可以从助手里说“约个时间”来改
+  const changing = changingHere || planFor === task.id
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const label = planLabel(at)
+  const where = state.resume?.taskId === task.id ? state.resume.where : undefined
+  useEffect(() => {
+    if (changing) reveal(pickerRef.current, { focus: true })
+  }, [changing])
+  // 从助手里改约成功后，也收起时间选项
+  useEffect(() => setChanging(false), [task.planAt])
+
+  const addToCalendar = () => {
+    downloadFile('nextstep-plan.ics', planIcs(task, at, where), 'text/calendar;charset=utf-8')
+    dispatch({ type: 'plan_cal', taskId: task.id })
+    showToast('日历文件已生成，打开它就能加进日历')
+  }
+  const calStale = !!task.planCal && task.planCal !== task.planAt
+  const calNote = calStale
+    ? '日历里还是原来那个时间的提醒：再加一次会更新它，或者把旧的那条删掉。'
+    : task.planCal
+      ? '已经生成过日历文件。之后改了时间，记得再加一次。'
+      : '日历文件只在你的设备上生成，到点由日历提醒你。'
+
+  return (
+    <section className="card animate-rise p-5 sm:p-7" aria-labelledby="booked-title">
+      <p className="flex items-center gap-2 text-[13px] font-medium text-sky-ink">
+        <CalendarClock size={15} aria-hidden /> 约好了 · {label}
+      </p>
+      <h2 id="booked-title" className="wrap-anywhere mt-2 text-balance text-[20px] font-semibold leading-snug tracking-tight text-ink">
+        {task.title}
+      </h2>
+      {/* 执行意图的写法：“到了什么时候，就先做哪一步” */}
+      <p className="mt-2 text-[15px] leading-relaxed text-ink-2">
+        到了{label}，先做这一步：<span className="font-medium text-ink">{firstStepOf(task, where)}</span>
+      </p>
+
+      {changing ? (
+        <div ref={pickerRef} tabIndex={-1} className="mt-5 outline-none">
+          <PlanPicker
+            task={task}
+            onBooked={() => setChanging(false)}
+            onClose={() => {
+              setChanging(false)
+              setPlanFor(null)
+              focusPrimary()
+            }}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button data-primary-action variant="primary" className="w-full sm:w-auto" icon={<CalendarPlus size={16} aria-hidden />} onClick={addToCalendar}>
+              加到日历
+            </Button>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-1">
+              <Button variant="ghost" className="max-sm:bg-sunken/70" onClick={() => cancelPlan(task.id, 'start')}>
+                现在就做
+              </Button>
+              <Button variant="ghost" className="max-sm:bg-sunken/70" onClick={() => setChanging(true)}>
+                改个时间
+              </Button>
+            </div>
+          </div>
+          <p className={cx('mt-3 text-[12px] leading-relaxed', calStale ? 'text-amber-ink' : 'text-muted')}>{calNote}</p>
+        </>
+      )}
+    </section>
+  )
+}
+
 /* ---------------- 当前行动卡 ---------------- */
 
 /** 本阶段的行动进度：每一小段是一个行动，紧挨着“本阶段已完成”的文字 */
@@ -258,14 +432,15 @@ function StageTrail({ list, currentId }: { list: Task[]; currentId: string }) {
 
 const RESUME_NAME: Record<string, string> = { project: '项目经历', skills: '技能栏', intro: '自我介绍' }
 
-function ActionCard({ task }: { task: Task }) {
-  const { state, dispatch, processing, runAI, stuckFor, setStuckFor, setNowView, openArtifact, showToast, decideRest } = useApp()
+function ActionCard({ task, planDue = false }: { task: Task; planDue?: boolean }) {
+  const { state, dispatch, processing, runAI, stuckFor, setStuckFor, planFor, setPlanFor, setNowView, openArtifact, openTask, showToast, decideRest } = useApp()
   const stage = state.stages.find((s) => s.id === task.stageId)
   const stageIdx = stage ? state.stages.findIndex((s) => s.id === stage.id) : -1
   const stageList = stage ? stageTasks(state, stage.id) : []
   const doneInStage = stageList.filter((t) => t.status === 'done').length
   const isProcessing = processing?.taskId === task.id
   const showStuck = stuckFor === task.id && !task.adjust
+  const showPlan = planFor === task.id && !showStuck && !isProcessing
   const adjust = task.adjust && task.adjust.reason !== 'distracted' ? task.adjust : undefined
   const resume = state.resume?.taskId === task.id ? state.resume : null
   const artifact = artifactById(state, task.artifactId)
@@ -274,12 +449,19 @@ function ActionCard({ task }: { task: Task }) {
   const stepsDone = new Set(task.stepsDone ?? [])
   const nextStep = steps.findIndex((_, i) => !stepsDone.has(i))
   const startedSteps = stepsDone.size > 0 && nextStep !== -1
+  const allStepsDone = steps.length > 0 && nextStep === -1
   const displayTitle = adjust?.reason === 'too_big' ? adjust.smallTitle : task.title
+  // AI 只在能做出东西的事上出现在主按钮里（写草稿、写消息、做判断）；修车、交电费这类，主按钮就是“开始第一步”
+  const help = aiHelp(task)
+  const aiPrimary = !!help && artifact?.status !== 'adopted'
+  const selfPrimary = !resume && !(task.status === 'draft' && artifact) && !aiPrimary
+  const selfLabel = allStepsDone ? '步骤都做完了，去确认' : startedSteps ? `接着做第 ${nextStep + 1} 步` : '开始第一步'
 
   // 交互区换了内容（处理中 / 卡住了 / 缩小 / 示例）时，滚到能看见的位置，并把焦点移过去
   const panelRef = useRef<HTMLDivElement>(null)
-  const mode = isProcessing ? 'processing' : showStuck ? 'stuck' : (adjust?.reason ?? 'idle')
-  const prevMode = useRef(mode === 'stuck' ? 'idle' : mode)
+  const mode = isProcessing ? 'processing' : showStuck ? 'stuck' : showPlan ? 'plan' : (adjust?.reason ?? 'idle')
+  // 从助手或别的页面打开“卡住了 / 约个时间”时，卡片是带着面板出现的：也要滚过去并移焦点
+  const prevMode = useRef(mode === 'stuck' || mode === 'plan' ? 'idle' : mode)
   useEffect(() => {
     if (prevMode.current !== mode && mode !== 'idle') reveal(panelRef.current, { focus: true })
     prevMode.current = mode
@@ -318,6 +500,11 @@ function ActionCard({ task }: { task: Task }) {
             </span>
           )}
           <span className="ml-auto flex items-center gap-2">
+            {planDue && (
+              <Pill tone="sky" icon={<AlarmClock size={12} aria-hidden />}>
+                约好的时间到了
+              </Pill>
+            )}
             {task.status === 'draft' && !resume && (
               <Pill tone="sky" icon={<FileText size={12} aria-hidden />}>
                 草稿已准备
@@ -343,6 +530,17 @@ function ActionCard({ task }: { task: Task }) {
         )}
 
         {!adjust && !low && task.why && <p className="mt-2 text-[15px] leading-relaxed text-ink-2">{task.why}</p>}
+
+        {/* 主按钮是“开始第一步”时，把第一步直接写出来：看一眼就知道从哪开始 */}
+        {!adjust && !low && selfPrimary && !startedSteps && !allStepsDone && steps.length > 0 && (
+          <p className="mt-3 flex items-start gap-2 text-[15px] leading-relaxed text-ink-2">
+            <ListChecks size={16} aria-hidden className="mt-[3px] shrink-0 text-accent" />
+            <span>
+              {task.stepsBy === 'ai' ? `AI 拆成了 ${steps.length} 步` : `一共 ${steps.length} 步`} · 第一步：
+              <span className="font-medium text-ink">{steps[0]}</span>
+            </span>
+          </p>
+        )}
 
         {!adjust && task.progress && task.progress.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
@@ -372,7 +570,14 @@ function ActionCard({ task }: { task: Task }) {
               </p>
               <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-[15px] leading-relaxed text-ink">{tinyStep ?? '花 5 分钟看一眼要做什么'}</p>
-                <Button size="sm" variant="secondary" className="shrink-0 self-start sm:self-auto" icon={<Check size={14} aria-hidden />} onClick={doTinyStep}>
+                <Button
+                  size="sm"
+                  variant={selfPrimary ? 'primary' : 'secondary'}
+                  data-primary-action={selfPrimary || undefined}
+                  className="shrink-0 self-start sm:self-auto"
+                  icon={<Check size={14} aria-hidden />}
+                  onClick={doTinyStep}
+                >
                   这一步做完了
                 </Button>
               </div>
@@ -415,6 +620,14 @@ function ActionCard({ task }: { task: Task }) {
             <ProcessingSteps task={task} step={processing!.step} />
           ) : showStuck ? (
             <StuckQuestion task={task} />
+          ) : showPlan ? (
+            <PlanPicker
+              task={task}
+              onClose={() => {
+                setPlanFor(null)
+                focusPrimary()
+              }}
+            />
           ) : adjust?.reason === 'too_big' ? (
             <ShrinkPanel task={task} />
           ) : adjust?.reason === 'unknown' ? (
@@ -462,7 +675,7 @@ function ActionCard({ task }: { task: Task }) {
                 >
                   查看草稿
                 </Button>
-              ) : (
+              ) : aiPrimary ? (
                 <Button
                   data-primary-action
                   variant="primary"
@@ -471,11 +684,39 @@ function ActionCard({ task }: { task: Task }) {
                   icon={<Sparkles size={17} aria-hidden />}
                   onClick={() => runAI(task.id)}
                 >
-                  {task.note || task.progress?.length ? 'AI 接着帮我写完' : 'AI 先帮我做'}
+                  {help === 'message' ? 'AI 先写消息' : help === 'judge' ? 'AI 先帮我判断' : task.note || task.progress?.length ? 'AI 接着帮我写完' : 'AI 先帮我做'}
+                </Button>
+              ) : low ? null : (
+                // 低精力时，上面“这一步做完了”就是主按钮，这里不再重复一个“开始第一步”
+                <Button
+                  data-primary-action
+                  variant="primary"
+                  size="lg"
+                  className="w-full sm:w-auto"
+                  icon={<ListChecks size={17} aria-hidden />}
+                  onClick={() => {
+                    leaveBanner()
+                    setNowView('self')
+                  }}
+                >
+                  {selfLabel}
                 </Button>
               )}
               <div className="grid grid-cols-2 gap-2 sm:flex sm:gap-1">
-                {resume ? (
+                {selfPrimary ? (
+                  // 主按钮已经是“自己做”：这里给“改步骤”，AI 拆得不合适时随时能改
+                  <Button
+                    variant="ghost"
+                    className="max-sm:bg-sunken/70"
+                    icon={<PenLine size={15} aria-hidden />}
+                    onClick={() => {
+                      leaveBanner()
+                      openTask(task.id, { editSteps: true })
+                    }}
+                  >
+                    改步骤
+                  </Button>
+                ) : resume && task.aiKind ? (
                   <Button variant="ghost" className="max-sm:bg-sunken/70" onClick={() => runAI(task.id)} icon={<Sparkles size={15} aria-hidden />}>
                     AI 帮我改完
                   </Button>
@@ -504,6 +745,16 @@ function ActionCard({ task }: { task: Task }) {
                   卡住了
                 </Button>
               </div>
+              {/* 第三层级：不和主按钮抢注意力，需要时才看得到 */}
+              <button
+                onClick={() => {
+                  leaveBanner()
+                  setPlanFor(task.id)
+                }}
+                className="hit inline-flex items-center gap-1.5 self-start rounded-md py-1 text-[13px] text-muted transition-colors hover:text-ink sm:ml-auto sm:self-center"
+              >
+                <CalendarClock size={14} aria-hidden /> 现在不方便？约个时间
+              </button>
             </div>
           )}
         </div>
@@ -628,6 +879,98 @@ function StuckQuestion({ task }: { task: Task }) {
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+/* ---------------- 约个时间 ---------------- */
+
+/** 现在不方便时，定好“什么时候”和“先做哪一步”。三个常用时间一点就约好，也可以自己选 */
+function PlanPicker({ task, onClose, onBooked }: { task: Task; onClose: () => void; onBooked?: () => void }) {
+  const { state, bookPlan } = useApp()
+  // 面板开着时时间也在走：选项每分钟重算，不会约到已经过去的时间
+  const now = useNow()
+  const rules = planRulesFor(state.tasks, task)
+  const options = planOptions(now, rules)
+  const where = state.resume?.taskId === task.id ? state.resume.where : undefined
+  const [custom, setCustom] = useState(false)
+  const [value, setValue] = useState(() => toLocalInput(options[0]?.at ?? new Date(now.getTime() + 3600_000)))
+  const [error, setError] = useState('')
+  const chosen = value ? new Date(value) : null
+  const valid = !!chosen && !Number.isNaN(chosen.getTime())
+  // 选的时间和用户自己定的规矩冲突（休息日、休息时间），提醒一句，仍然可以约
+  const conflict = valid ? ruleConflict(chosen!, rules) : null
+
+  const book = (at: Date) => {
+    if (bookPlan(task.id, at)) onBooked?.()
+  }
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!valid) return setError('先选一个日期和时间')
+    if (chosen!.getTime() <= Date.now()) return setError('选一个现在之后的时间')
+    book(chosen!)
+  }
+
+  return (
+    <div className="animate-rise border-t border-line pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-[16px] font-semibold text-ink">什么时候做这件事？</h3>
+          <p className="mt-0.5 text-[13px] text-muted">定好时间和第一步，到时候更容易开始。</p>
+        </div>
+        <IconButton label="先不约了，收起" onClick={onClose}>
+          <X size={18} aria-hidden />
+        </IconButton>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        {options.map((o) => (
+          <button
+            key={o.id}
+            onClick={() => book(o.at)}
+            className="group flex min-h-14 items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-left transition-[border-color,box-shadow,background] hover:border-accent/50 hover:shadow-[var(--shadow-card)] active:bg-accent-softer sm:flex-col sm:items-start sm:justify-start sm:gap-0.5 sm:px-3"
+          >
+            <span className="text-[15px] font-medium text-ink sm:text-[14px]">{o.label}</span>
+            <span className="text-[12px] tabular-nums text-muted">{o.hint}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mt-3 flex items-start gap-2 text-[13px] leading-relaxed text-ink-2">
+        <Footprints size={15} aria-hidden className="mt-0.5 shrink-0 text-accent" />
+        <span>到时候先做：{firstStepOf(task, where)}</span>
+      </p>
+      {custom ? (
+        <form onSubmit={submit} noValidate className="mt-3 animate-fade-in">
+          <label htmlFor="plan-time" className="text-[13px] font-medium text-ink-2">
+            选个时间
+          </label>
+          <div className="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              id="plan-time"
+              type="datetime-local"
+              autoFocus
+              min={toLocalInput(now)}
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value)
+                setError('')
+              }}
+              aria-invalid={!!error}
+              aria-describedby="plan-time-note"
+              className="h-10 min-w-0 rounded-xl border border-line-strong bg-surface px-3 text-[14px] text-ink outline-none transition-[border-color,box-shadow] focus:border-accent/60 focus:ring-4 focus:ring-accent/10 touch:h-11"
+            />
+            <Button type="submit" variant="secondary">
+              就这个时间
+            </Button>
+          </div>
+          <p id="plan-time-note" aria-live="polite" className={cx('mt-1.5 text-[12px] leading-relaxed', error || conflict ? 'text-amber-ink' : 'text-muted')}>
+            {error || (conflict ? `这个时间和你定的“${conflict}”冲突。确定的话也可以约。` : '')}
+          </p>
+        </form>
+      ) : (
+        <button onClick={() => setCustom(true)} className="hit mt-2 inline-flex items-center rounded-md py-1 text-[13px] font-medium text-accent hover:underline">
+          选别的时间…
+        </button>
+      )}
     </div>
   )
 }
@@ -1025,7 +1368,7 @@ function SideInfo({ quiet }: { quiet: boolean }) {
 /* ---------------- 我来做 ---------------- */
 
 function SelfDoView({ task }: { task: Task }) {
-  const { state, dispatch, setNowView, setStuckFor, say, completeWithUndo } = useApp()
+  const { state, dispatch, setNowView, setStuckFor, say, completeWithUndo, openTask } = useApp()
   const [note, setNote] = useState('')
   const [showNote, setShowNote] = useState(false)
   useBackHandler(true, () => setNowView('home'))
@@ -1059,15 +1402,21 @@ function SelfDoView({ task }: { task: Task }) {
       </p>
 
       <section className="mt-6" aria-labelledby="steps-title">
-        <h2 id="steps-title" className="mb-2 text-[13px] font-medium text-ink-2">
-          一步一步来，做完一步点一下
-        </h2>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <h2 id="steps-title" className="text-[13px] font-medium text-ink-2">
+            一步一步来，做完一步点一下
+            {task.stepsBy === 'ai' && <span className="ml-1.5 font-normal text-muted">· AI 拆的，可以改</span>}
+          </h2>
+          <button onClick={() => openTask(task.id, { editSteps: true })} className="hit inline-flex items-center gap-1 rounded-md py-0.5 text-[13px] font-medium text-accent hover:underline">
+            <PenLine size={13} aria-hidden /> 改步骤
+          </button>
+        </div>
         <ol className="space-y-2">
           {steps.map((s, i) => {
             const isDone = done.has(i)
             const isNext = i === nextIdx
             return (
-              <li key={s}>
+              <li key={`${i}-${s}`}>
                 <button
                   role="checkbox"
                   aria-checked={isDone}

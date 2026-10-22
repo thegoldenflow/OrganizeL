@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { ArrowUp, CircleCheck, FileText, Footprints, X } from 'lucide-react'
 import type { ChatAction } from '../data/types'
 import { focusTask, uid, useApp, useBackHandler } from '../state/store'
-import { matchIntent } from '../lib/mockAI'
+import { adoptLabel, aiHelp, matchIntent } from '../lib/mockAI'
 import { dueLabel, parseDue } from '../lib/dates'
 import { reducedMotion, useDialog } from '../lib/hooks'
 import { useApplyStuck } from '../pages/NowPage'
+import { planAtFor, planLabel, planRulesFor, ruleConflict } from '../lib/plan'
 import { IconButton, cx } from './ui'
 
 const QUICK = ['继续', '卡住', '帮我整理']
@@ -54,15 +55,24 @@ export function AssistantPanel({ variant }: { variant: 'column' | 'overlay' }) {
           return
         }
         app.go('now')
+        // 说“继续”就是现在做：之前约的时间作废
+        if (f.planAt) app.dispatch({ type: 'set_plan', taskId: f.id, reason: 'start' })
         if (state.resume?.taskId === f.id) {
           app.openArtifact(state.resume.artifactId, state.resume.cursor)
           app.say(`接着上次：停在${state.resume.where}。草稿已打开，光标在你停下的地方。`)
         } else if (f.status === 'draft' && f.artifactId) {
           app.openArtifact(f.artifactId)
-          app.say('草稿在这里，接着改就行。改好点“采用这版”。')
-        } else {
+          const art = state.artifacts.find((x) => x.id === f.artifactId)
+          app.say(`草稿在这里，接着改就行。改好点“${art ? adoptLabel(art) : '采用这版'}”。`)
+        } else if (aiHelp(f) && state.artifacts.find((x) => x.id === f.artifactId)?.status !== 'adopted') {
           app.runAI(f.id)
           app.say(`好，我先写“${f.title}”的草稿。`)
+        } else {
+          // AI 做不出成果的事（修车、交电费……）：直接带用户到下一步
+          const steps = f.steps ?? []
+          const i = steps.findIndex((_, k) => !f.stepsDone?.includes(k))
+          app.setNowView('self')
+          app.say(i === -1 ? '步骤都勾完了，确认没问题就点“完成了”。' : `好，从第 ${i + 1} 步开始：${steps[i]}。`)
         }
         closeIfOverlay()
         return
@@ -111,11 +121,33 @@ export function AssistantPanel({ variant }: { variant: 'column' | 'overlay' }) {
       case 'done': {
         if (f?.status === 'draft' && f.artifactId) {
           app.openArtifact(f.artifactId)
-          app.say('草稿打开了，确认没问题就点“采用这版”。')
+          const art = state.artifacts.find((x) => x.id === f.artifactId)
+          app.say(`草稿打开了，确认没问题就点“${art ? adoptLabel(art) : '采用这版'}”。`)
         } else if (f) {
           app.go('now')
           app.setNowView('self')
           app.say('在这里点“完成了”就会记下来。')
+        }
+        closeIfOverlay()
+        return
+      }
+      case 'schedule': {
+        if (!f) return app.say('现在没有进行中的行动，不用约时间。')
+        app.go('now')
+        const openPicker = (text: string) => {
+          app.setStuckFor(null)
+          app.setPlanFor(f.id)
+          app.say(text)
+        }
+        if (!intent.when) {
+          openPicker('好，什么时候做？首页卡片里有几个时间，点一个就约好。')
+        } else {
+          const at = planAtFor(intent.when, new Date(), planRulesFor(state.tasks, f))
+          const conflict = ruleConflict(at, planRulesFor(state.tasks, f))
+          if (at.getTime() <= Date.now() + 5 * 60_000) openPicker(`${planLabel(at)}已经过了，换个时间吧。首页卡片里有几个时间可以选。`)
+          else if (conflict) openPicker(`${planLabel(at)}和你定的“${conflict}”冲突，换个时间吧。首页卡片里有几个时间可以选。`)
+          // 在助手里约时间，光标留在输入框里，不跳走
+          else app.bookPlan(f.id, at, { refocus: false })
         }
         closeIfOverlay()
         return
@@ -172,7 +204,15 @@ export function AssistantPanel({ variant }: { variant: 'column' | 'overlay' }) {
             <span className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-ink group-hover:text-accent-ink">
               {focus.adjust?.reason === 'too_big' ? focus.adjust.smallTitle : focus.title}
               <span className="ml-1.5 font-normal text-muted">
-                {app.processing?.taskId === focus.id ? '· 正在写草稿' : focus.status === 'draft' ? '· 草稿已准备' : focus.adjust && focus.adjust.reason !== 'distracted' ? '· 已调整' : ''}
+                {app.processing?.taskId === focus.id
+                  ? '· 正在写草稿'
+                  : focus.planAt && new Date(focus.planAt).getTime() > Date.now()
+                    ? `· 约在${planLabel(new Date(focus.planAt))}`
+                    : focus.status === 'draft'
+                      ? '· 草稿已准备'
+                      : focus.adjust && focus.adjust.reason !== 'distracted'
+                        ? '· 已调整'
+                        : ''}
               </span>
             </span>
           </button>

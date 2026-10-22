@@ -1,8 +1,40 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, LifeBuoy, LogOut } from 'lucide-react'
+import { Check, LifeBuoy, LogOut, Timer } from 'lucide-react'
 import { focusTask, useApp, useBackHandler } from '../state/store'
-import { useDialog, useMedia } from '../lib/hooks'
+import { STORAGE_KEY } from '../data/seed'
+import { useDialog, useMedia, useNow } from '../lib/hooks'
 import { Button, KeepPhrases, cx } from './ui'
+
+/**
+ * 可选的正计时：只显示“已专注几分钟”，不倒计时、不显示秒、不到点提醒。
+ * 对时间不敏感的人，把时间“摆在眼前”能帮助感知时间（Barkley 关于 ADHD 的“把时间外化”建议）；
+ * 倒计时则会带来截止压力，所以默认关闭，想用的人点一下“计时”，下次进来还记得。
+ */
+const TIMER_KEY = `${STORAGE_KEY}-focus-timer`
+function readTimerPref() {
+  try {
+    return localStorage.getItem(TIMER_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeTimerPref(on: boolean) {
+  try {
+    if (on) localStorage.setItem(TIMER_KEY, '1')
+    else localStorage.removeItem(TIMER_KEY)
+  } catch {
+    /* 隐私模式下忽略 */
+  }
+}
+
+const minutesSince = (t: number, now = Date.now()) => Math.max(0, Math.floor((now - t) / 60_000))
+
+/** 每 15 秒刷新一次，只在计时打开时挂载 */
+function FocusClock({ since }: { since: number }) {
+  const now = useNow(15_000)
+  const m = minutesSince(since, now.getTime())
+  return <>{m < 1 ? '刚开始专注' : `已专注 ${m} 分钟`}</>
+}
 
 /** “容易分心”时的简洁视图：只保留当前行动和下一小步 */
 export function FocusOverlay() {
@@ -11,6 +43,14 @@ export function FocusOverlay() {
   const ref = useRef<HTMLDivElement>(null)
   const doneHere = useRef(0)
   const [finished, setFinished] = useState(false)
+  const [showTimer, setShowTimer] = useState(readTimerPref)
+  // 每次进入简洁视图都从 0 开始算；在渲染时就重置，避免先闪一下上一次的时长
+  const [startedAt, setStartedAt] = useState(() => Date.now())
+  const [wasOpen, setWasOpen] = useState(focusMode)
+  if (focusMode !== wasOpen) {
+    setWasOpen(focusMode)
+    if (focusMode) setStartedAt(Date.now())
+  }
   const touch = useMedia('(pointer: coarse)')
   const open = focusMode && !!task
 
@@ -21,19 +61,43 @@ export function FocusOverlay() {
     }
   }, [focusMode])
 
+  // 切到别的应用、锁屏的那段时间不算“专注”：页面隐藏期间暂停计时
+  useEffect(() => {
+    if (!open) return
+    let hiddenAt: number | null = null
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') hiddenAt = Date.now()
+      else if (hiddenAt !== null) {
+        const away = Date.now() - hiddenAt
+        hiddenAt = null
+        setStartedAt((t) => t + away)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [open])
+
+  const toggleTimer = () => {
+    const next = !showTimer
+    setShowTimer(next)
+    writeTimerPref(next)
+  }
+
   function exit(extra?: () => void) {
     if (!task) return setFocusMode(false)
+    // 打开了计时才提专注时长；没打开就不统计给用户看
+    const mins = showTimer ? minutesSince(startedAt) : 0
     if (doneHere.current > 0) {
       dispatch({
         type: 'log_progress',
         taskId: task.id,
         title: `在简洁视图里完成了 ${doneHere.current} 步`,
-        detail: task.title,
+        detail: mins >= 1 ? `${task.title} · 专注 ${mins} 分钟` : task.title,
       })
     }
     dispatch({ type: 'set_adjust', taskId: task.id, adjust: undefined })
     setFocusMode(false)
-    if (doneHere.current > 0) showToast(`推进了 ${doneHere.current} 步，已记到进展`)
+    if (doneHere.current > 0) showToast(`推进了 ${doneHere.current} 步${mins >= 1 ? `，专注了 ${mins} 分钟` : ''}，已记到进展`)
     extra?.()
   }
 
@@ -56,10 +120,36 @@ export function FocusOverlay() {
   return (
     <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="focus-title" className="fixed inset-0 z-[80] flex animate-fade-in flex-col bg-canvas">
       <div className="flex items-center justify-between gap-3 px-4 py-2 sm:px-8 sm:py-4">
-        <span className="pl-1 text-[13px] text-muted">简洁视图 · 其他内容已收起</span>
-        <Button variant="ghost" size="sm" icon={<LogOut size={14} aria-hidden />} onClick={() => exit()}>
-          退出
-        </Button>
+        <span className="pl-1 text-[13px] tabular-nums text-muted">
+          {showTimer ? (
+            <>
+              {/* 窄屏上只留时长，不折行 */}
+              <span className="hidden sm:inline">简洁视图 · </span>
+              <FocusClock since={startedAt} />
+            </>
+          ) : (
+            <>
+              简洁视图
+              <span className="hidden sm:inline"> · 其他内容已收起</span>
+            </>
+          )}
+        </span>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={showTimer}
+            title={showTimer ? '关掉计时' : '显示已专注多久（不倒计时）'}
+            icon={<Timer size={14} aria-hidden />}
+            onClick={toggleTimer}
+            className={cx(showTimer && 'bg-sunken text-ink')}
+          >
+            计时
+          </Button>
+          <Button variant="ghost" size="sm" icon={<LogOut size={14} aria-hidden />} onClick={() => exit()}>
+            退出
+          </Button>
+        </div>
       </div>
 
       <div className="mx-auto flex w-full max-w-[600px] flex-1 flex-col px-5 sm:justify-center sm:pb-24">

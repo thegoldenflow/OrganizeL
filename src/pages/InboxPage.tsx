@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Archive, ArrowRight, CalendarClock, Check, ChevronDown, ChevronRight, CornerDownLeft, Hourglass, Inbox, RefreshCcw, Sparkles, Target, Undo2 } from 'lucide-react'
 import type { Bucket, Task } from '../data/types'
-import { BUCKET_LABEL, MOVE_VERB, currentStage, inboxItems, uid, useApp } from '../state/store'
+import { BUCKET_LABEL, MOVE_VERB, currentStage, inboxItems, planAddNote, uid, useApp } from '../state/store'
 import { daysFromToday, dueLabel, relativeTime } from '../lib/dates'
 import { useMedia, useMenu } from '../lib/hooks'
 import { Button, CategoryTag, Empty, Pill, Spinner, cx, menuItem, menuPanel } from '../components/ui'
@@ -50,8 +50,10 @@ export function InboxPage() {
   const applyAll = () => {
     const snap = state
     const n = suggested.length
+    const toPlan = suggested.filter((t) => t.suggestion?.bucket === 'plan' && !t.steps?.length).length
     dispatch({ type: 'apply_all' })
-    showToast(`已按建议放好 ${n} 件事`, () => {
+    const note = toPlan === 1 ? '，加入规划的那件 AI 先拆好了步骤' : toPlan > 1 ? `，加入规划的 ${toPlan} 件 AI 都先拆好了步骤` : ''
+    showToast(`已按建议放好 ${n} 件事${note}`, () => {
       dispatch({ type: 'load', state: snap })
       showToast('已撤销')
     })
@@ -76,7 +78,8 @@ export function InboxPage() {
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            // 中文输入法选字时的回车不算（Safari 上 isComposing 不可靠，再看 keyCode 229）
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault()
               add()
             }
@@ -205,7 +208,7 @@ function InboxItem({ task, fresh }: { task: Task; fresh: boolean }) {
     const next = (li?.nextElementSibling ?? li?.previousElementSibling)?.querySelector<HTMLElement>('button')
     const snap = state
     dispatch({ type: 'move', id: task.id, bucket: b })
-    const text = b === 'archived' ? `已归档“${task.title}”` : b === 'plan' ? `已加入当前规划 · ${stage.title}` : `已${MOVE_VERB[b]}`
+    const text = b === 'archived' ? `已归档“${task.title}”` : b === 'plan' ? `已加入当前规划 · ${stage.title}${planAddNote(task)}` : `已${MOVE_VERB[b]}`
     showToast(text, () => {
       dispatch({ type: 'load', state: snap })
       showToast('已撤销')
